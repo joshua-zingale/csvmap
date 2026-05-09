@@ -2,7 +2,7 @@ use std::io::BufRead;
 
 pub struct File<R: std::io::Read> {
     reader: std::io::BufReader<R>,
-    buffer: String,
+    buffer: Vec<u8>,
     first: bool,
 }
 
@@ -10,164 +10,319 @@ impl<T: std::io::Read> File<T> {
     pub fn new(reader: T) -> Self {
         File {
             reader: std::io::BufReader::new(reader),
-            buffer: String::new(),
+            buffer: Vec::new(),
             first: true,
         }
     }
 
-    pub fn read<'a>(&'a mut self) -> Option<Row<'a>> {
+    pub fn read<'a>(&'a mut self) -> Result<Option<Record<'a>>, std::io::Error> {
         self.buffer.clear();
         let first = self.first;
         self.first = false;
 
-        match self.reader.read_line(&mut self.buffer) {
-            Ok(0) if first => Some(Row(self.buffer.as_str())),
-            Ok(0) => None,
-            Ok(_) => {
-                if self.buffer.as_bytes()[self.buffer.len() - 1] == b'\n' {
+        let mut num_quotes = 0;
+        loop {
+            let last_size = self.buffer.len();
+            let num_read = self.reader.read_until(b'\n', &mut self.buffer)?;
+            if !first && num_read == 0 {
+                return Ok(None);
+            }
+            num_quotes += self.buffer[last_size..]
+                .iter()
+                .filter(|&&v| v == b'"')
+                .count();
+
+            if num_quotes % 2 == 0 {
+                if self.buffer.ends_with(b"\n") {
                     self.buffer.pop();
-                    if let Some(&last) = self.buffer.as_bytes().last()
-                        && last == b'\r'
-                    {
+                    if self.buffer.ends_with(b"\r") {
                         self.buffer.pop();
                     }
                 }
-                Some(Row(self.buffer.as_str()))
+                return Ok(Some(Record(&self.buffer)));
+            } else if self.buffer.len() == last_size {
+                return Ok(Some(Record(&self.buffer)));
             }
-            Err(_) => None,
         }
     }
 }
 
-pub struct Row<'a>(&'a str);
+#[derive(Clone)]
+pub struct Record<'a>(&'a [u8]);
 
-impl<'a> Row<'a> {
-    pub fn iter(&self) -> RowIter<'a> {
-        RowIter {
+impl<'a> Record<'a> {
+    pub fn iter(&self) -> RecordIter<'a> {
+        RecordIter {
             rest: self.0,
             is_next: true,
         }
     }
 }
 
-pub struct RowIter<'a> {
-    rest: &'a str,
+pub struct RecordIter<'a> {
+    rest: &'a [u8],
     is_next: bool,
 }
 
-impl<'a> Iterator for RowIter<'a> {
-    type Item = Field<'a>;
+impl<'a> Iterator for RecordIter<'a> {
+    type Item = Result<Field<'a>, String>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if !self.is_next {
             return None;
         }
 
-        if !self.rest.starts_with('"') {
-            if let Some(comma_pos) = self.rest.bytes().position(|c| c == b',') {
-                let field = _Field::Clean(&self.rest[..comma_pos]);
-                self.rest = &self.rest[comma_pos + 1..];
-                Some(Field(field))
-            } else {
-                self.is_next = false;
-                Some(Field(_Field::Clean(self.rest)))
-            }
-        } else {
+        if self.rest.starts_with(b"\"") {
             let mut parts = Vec::new();
 
-            let mut rest = self.rest;
+            let mut rest = &self.rest[1..];
+
             loop {
-                if let Some(double_quote_pos) = rest.bytes().position(|c| c == b'"') {
-                    if let Some(&c) = rest.as_bytes().get(1)
-                        && c == b'"'
-                    {
-                        parts.push(&rest[..double_quote_pos + 1]);
-                        rest = &rest[double_quote_pos + 2..]
-                    } else if let Some(comma_pos) = rest.bytes().position(|c| c == b',') {
-                        parts.push(&rest[..comma_pos]);
-                        rest = &rest[comma_pos + 1..];
-                        break;
-                    } else {
-                        self.is_next = false;
-                        parts.push(rest);
-                        break;
+                if let Some(quote_pos) = rest.iter().position(|&c| c == b'"') {
+                    println!("'{}'", String::from_utf8_lossy(rest));
+                    match rest.get(quote_pos + 1) {
+                        None => {
+                            self.is_next = false;
+                            parts.push(&rest[..quote_pos]);
+                            break;
+                        }
+                        Some(b',') => {
+                            parts.push(&rest[..quote_pos]);
+                            self.rest = &rest[quote_pos + 2..];
+                            break;
+                        }
+                        Some(b'"') => {
+                            parts.push(&rest[..=quote_pos]);
+                            rest = &rest[quote_pos + 2..];
+                        }
+                        Some(&c) => {
+                            return Some(Err(format!("unexpected byte `0x{:X}`", c)));
+                        }
                     }
                 } else {
-                    self.is_next = false;
-                    parts.push(rest);
-                    break;
+                    return Some(Err("unclosed double quote".to_string()));
                 }
             }
 
-            self.rest = rest;
-            Some(Field(_Field::Escaped(parts)))
+            Some(Ok(Field(_Field::Escaped(parts))))
+        } else {
+            let comma_pos = self.rest.iter().position(|&c| c == b',');
+            let quote_pos = self.rest.iter().position(|&c| c == b'"');
+
+            match (comma_pos, quote_pos) {
+                (None, None) => {
+                    self.is_next = false;
+                    Some(Ok(Field(_Field::Clean(self.rest))))
+                }
+                (None, Some(_)) => {
+                    self.is_next = false;
+                    Some(Err("double quote in unescaped field".to_string()))
+                }
+                (Some(cp), Some(qp)) if qp < cp => {
+                    Some(Err("double quote in unescaped field".to_string()))
+                }
+                (Some(cp), _) => {
+                    let field = _Field::Clean(&self.rest[..cp]);
+                    self.rest = &self.rest[cp + 1..];
+                    Some(Ok(Field(field)))
+                }
+            }
         }
     }
 }
 
 pub struct Field<'a>(_Field<'a>);
 
-impl<'a> Field<'a> {
-    pub fn get_string(&self) -> String {
+impl<'a> std::fmt::Display for Field<'a> {
+    /// Makes a lossy conversion in the event that the underlying data
+    /// are invalid utf8.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.0 {
-            _Field::Clean(s) => s.to_string(),
-            _Field::Escaped(parts) => parts.join(""),
+            _Field::Clean(s) => write!(f, "{}", String::from_utf8_lossy(s)),
+            _Field::Escaped(parts) => {
+                for part in parts {
+                    write!(f, "{}", String::from_utf8_lossy(part))?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<'a> Field<'a> {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.write_to(&mut buffer)
+            .expect("writing to Vec should never fail");
+        buffer
+    }
+    pub fn write_to<W: std::io::Write>(&self, writer: &mut W) -> Result<(), std::io::Error> {
+        match &self.0 {
+            _Field::Clean(s) => writer.write_all(s),
+            _Field::Escaped(parts) => {
+                for part in parts {
+                    writer.write_all(part)?
+                }
+                Ok(())
+            }
         }
     }
 }
 
 enum _Field<'a> {
-    Clean(&'a str),
+    Clean(&'a [u8]),
     Escaped(EscapedIter<'a>),
 }
 
-type EscapedIter<'a> = Vec<&'a str>;
+type EscapedIter<'a> = Vec<&'a [u8]>;
+
+#[cfg(test)]
+impl<'a> File<&'a [u8]> {
+    fn read_to_vec(&mut self) -> Vec<String> {
+        self.read()
+            .expect("Major I/O failure")
+            .expect("Expected a row, found EOF")
+            .iter()
+            .map(|f| f.unwrap().to_string())
+            .collect()
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn reads_three_rows() {
-        let mut f = File::new("a,b\n1,2\n3,4".as_bytes());
+    fn reads_one_unquoted_row() {
+        let mut f = File::new("a,bc , def".as_bytes());
 
-        assert!(f.read().is_some());
-        assert!(f.read().is_some());
-        assert!(f.read().is_some());
-        assert!(f.read().is_none());
+        let vec = f.read_to_vec();
+
+        assert_eq!(vec!["a", "bc ", " def"], vec);
     }
 
     #[test]
-    fn reads_one_row_for_empty_string() {
+    fn reads_three_unquoted_rows() {
+        let mut f = File::new("a,b\n1,2,3\n3".as_bytes());
+
+        assert_eq!(vec!["a", "b"], f.read_to_vec());
+        assert_eq!(vec!["1", "2", "3"], f.read_to_vec(),);
+        assert_eq!(vec!["3"], f.read_to_vec(),);
+        assert!(f.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn reads_empty_string_as_one_empty_field() {
         let mut f = File::new("".as_bytes());
 
-        assert!(f.read().is_some());
-        assert!(f.read().is_none());
+        assert_eq!(vec![""], f.read_to_vec());
+        assert!(f.read().unwrap().is_none());
     }
 
     #[test]
-    fn reads_one_row_for_single_newline() {
+    fn reads_newline_as_one_empty_fiel() {
         let mut f = File::new("\n".as_bytes());
 
-        assert!(f.read().is_some());
-        assert!(f.read().is_none());
+        assert_eq!(vec![""], f.read_to_vec());
+        assert!(f.read().unwrap().is_none());
+
+        let mut f = File::new("\r\n".as_bytes());
+
+        assert_eq!(vec![""], f.read_to_vec());
+        assert!(f.read().unwrap().is_none());
     }
 
     #[test]
-    fn reads_one_row() {
-        let one_rows = vec!["a,b,c,", "a,b,", "a,b", "aasdf"]
-            .into_iter()
-            .map(|s| s.as_bytes());
+    fn reads_one_single_empty_field_row_for_single_field() {
+        let mut f = File::new(" Hello world! ".as_bytes());
 
-        for row in one_rows {
-            let mut f = File::new(row);
-            assert!(f.read().is_some());
-            assert!(f.read().is_none());
-        }
+        assert_eq!(vec![" Hello world! "], f.read_to_vec());
+        assert!(f.read().unwrap().is_none());
     }
 
     #[test]
-    fn reads_values() {
-        todo!();
+    fn reads_one_quoted_field() {
+        let mut f = File::new("\" Hello world! \"".as_bytes());
+
+        assert_eq!(vec![" Hello world! "], f.read_to_vec());
+        assert!(f.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn reads_one_quoted_field_with_comma() {
+        let mut f = File::new("\" Hello, world! \"".as_bytes());
+
+        assert_eq!(vec![" Hello, world! "], f.read_to_vec(),);
+        assert!(f.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn reads_single_character_quoted_field() {
+        let mut f = File::new("\"a\"".as_bytes());
+
+        assert_eq!(vec!["a"], f.read_to_vec());
+        assert!(f.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn reads_comma_character_quoted_field() {
+        let mut f = File::new("\",\"".as_bytes());
+
+        assert_eq!(vec![","], f.read_to_vec());
+        assert!(f.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn reads_quoted_field_with_newlines() {
+        let mut f = File::new("\"i\nlike\r\nyou\"".as_bytes());
+        assert_eq!(vec!["i\nlike\r\nyou"], f.read_to_vec());
+        assert!(f.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn reads_double_quote_alone_in_quoted_field() {
+        let mut f = File::new("\"\"\"\"".as_bytes());
+        assert_eq!(vec!["\""], f.read_to_vec());
+        assert!(f.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn error_quote_in_unquoted_field() {
+        let mut f = File::new("data,\"bad_quote,more_data".as_bytes());
+        let record = f.read().unwrap().expect("Should find a row");
+        let mut iter = record.iter();
+
+        assert!(iter.next().unwrap().is_ok());
+        assert!(iter.next().unwrap().is_err());
+    }
+
+    #[test]
+    fn error_stray_quote_in_quoted_field() {
+        let mut f = File::new("\"The \"Great\" Gatsby\",1925".as_bytes());
+        let record = f.read().unwrap().expect("Should find a row");
+        let mut iter = record.iter();
+
+        assert!(iter.next().unwrap().is_err());
+    }
+
+    #[test]
+    fn error_incomplete_escape_at_end_of_field() {
+        let mut f = File::new("\"starts but never ends".as_bytes());
+        assert!(f.read().unwrap().unwrap().iter().next().unwrap().is_err());
+    }
+
+    #[test]
+    fn error_garbage_after_closing_quote() {
+        let mut f = File::new("\"field\"invalid_continuation,next".as_bytes());
+        let record = f.read().unwrap().expect("Should find a row");
+        let mut iter = record.iter();
+
+        assert!(iter.next().unwrap().is_err());
+    }
+
+    #[test]
+    fn error_imbalanced_quotes_multiline() {
+        let mut f = File::new("\"line one\n line two \"\" still open\n".as_bytes());
+        assert!(f.read().unwrap().unwrap().iter().next().unwrap().is_err());
     }
 }
