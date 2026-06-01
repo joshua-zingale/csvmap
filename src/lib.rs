@@ -1,2 +1,2 @@
-pub mod argparse;
+mod common;
 pub mod csv;
