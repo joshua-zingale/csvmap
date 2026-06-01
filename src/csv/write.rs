@@ -1,6 +1,7 @@
 use std::io::{BufReader, BufWriter, Read, Write};
 
 /// Encodes data from a reader as a quoted CSV field and writes them to a writer.
+/// Does not flush writer.
 pub fn encode_and_write_quoted<R: Read, W: Write>(writer: W, reader: R) -> std::io::Result<usize> {
     let reader = BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
@@ -23,7 +24,6 @@ pub fn encode_and_write_quoted<R: Read, W: Write>(writer: W, reader: R) -> std::
 
     writer.write_all(b"\"")?;
     written += 1;
-    writer.flush()?;
     Ok(written)
 }
 
