@@ -36,61 +36,55 @@ pub fn read_record<R: std::io::Read>(
     }
 }
 
-/// A CSV Record.
-#[derive(Clone)]
-pub struct Record<'a>(&'a [u8]);
-
-impl<'a> Record<'a> {
-    pub fn new(record: &'a [u8]) -> Self {
-        Record(record)
-    }
-    /// Reads `expected_fields` fields from this [Record] into `buf`.
-    ///
-    /// If `expected_fields` is `None`, any number of fields
-    /// is accepted. Otherwise, this errors in the event of
-    /// an incorrect number of fields being in this [Record].
-    ///
-    /// Halts on the first field that errors.
-    pub fn read(
-        &self,
-        buf: &mut Vec<Field<'a>>,
-        expected_fields: Option<usize>,
-    ) -> Result<(), Error> {
-        let mut fields_read = 0;
-        for (i, field) in self.iter().enumerate() {
-            if let Some(n) = expected_fields
-                && i >= n
-            {
-                return Err(Error::FieldCount { want: n, got: i });
-            }
-            let field = field.map_err(|e| e.add_field(i))?;
-            buf.push(field);
-            fields_read += 1;
-        }
-
+/// Reads `expected_fields` fields from a `record` into `buf`.
+///
+/// If `expected_fields` is `None`, any number of fields
+/// is accepted. Otherwise, this errors in the event of
+/// an incorrect number of fields being in this [Record].
+///
+/// Halts on the first field that errors.
+pub fn parse_fields<'a>(
+    record: &'a [u8],
+    buf: &mut Vec<Field<'a>>,
+    expected_fields: Option<usize>,
+) -> Result<(), Error> {
+    let mut fields_read = 0;
+    for (i, field) in RecordIter::new(record).enumerate() {
         if let Some(n) = expected_fields
-            && n > fields_read
+            && i >= n
         {
-            return Err(Error::FieldCount {
-                want: n,
-                got: fields_read,
-            });
+            return Err(Error::FieldCount { want: n, got: i });
         }
+        let field = field.map_err(|e| e.add_field(i))?;
+        buf.push(field);
+        fields_read += 1;
+    }
 
-        Ok(())
+    if let Some(n) = expected_fields
+        && n > fields_read
+    {
+        return Err(Error::FieldCount {
+            want: n,
+            got: fields_read,
+        });
     }
-    pub fn iter(&self) -> RecordIter<'a> {
-        RecordIter {
-            rest: self.0,
-            is_next: true,
-        }
-    }
+
+    Ok(())
 }
 
 /// Iterates over the fields in a Record.
 pub struct RecordIter<'a> {
     rest: &'a [u8],
     is_next: bool,
+}
+
+impl<'a> RecordIter<'a> {
+    pub fn new(record: &'a [u8]) -> Self {
+        RecordIter {
+            rest: record,
+            is_next: true,
+        }
+    }
 }
 
 impl<'a> Iterator for RecordIter<'a> {
@@ -353,9 +347,7 @@ mod tests {
 
         #[test]
         fn empty_string_to_empty_field() {
-            let record = Record::new(b"");
-
-            let mut i = record.iter();
+            let mut i = RecordIter::new(b"");
             let first = i.next().unwrap().unwrap();
             assert!(first.contents_eq(b""));
             assert!(i.next().is_none());
@@ -363,9 +355,7 @@ mod tests {
 
         #[test]
         fn single_non_empty_field() {
-            let record = Record::new(b"hfo d ");
-
-            let mut i = record.iter();
+            let mut i = RecordIter::new(b"hfo d ");
             let first = i.next().unwrap().unwrap();
             assert!(first.contents_eq(b"hfo d "));
             assert!(i.next().is_none());
@@ -373,9 +363,7 @@ mod tests {
 
         #[test]
         fn three_fields() {
-            let record = Record::new(b"hfo, d, ");
-
-            let mut i = record.iter();
+            let mut i = RecordIter::new(b"hfo, d, ");
             assert!(i.next().unwrap().unwrap().contents_eq(b"hfo"));
             assert!(i.next().unwrap().unwrap().contents_eq(b" d"));
             assert!(i.next().unwrap().unwrap().contents_eq(b" "));
@@ -384,35 +372,27 @@ mod tests {
 
         #[test]
         fn empty_quoted_field() {
-            let record = Record::new(b"\"\"");
-
-            let mut i = record.iter();
+            let mut i = RecordIter::new(b"\"\"");
             assert!(i.next().unwrap().unwrap().contents_eq(b""));
             assert!(i.next().is_none());
         }
 
         #[test]
         fn quoted_field_with_comma_therein() {
-            let record = Record::new(b"\",\"");
-
-            let mut i = record.iter();
+            let mut i = RecordIter::new(b"\",\"");
             assert!(i.next().unwrap().unwrap().contents_eq(b","));
             assert!(i.next().is_none());
         }
         #[test]
         fn quoted_field_with_escaped_quote() {
-            let record = Record::new(b"\"\"\"\"");
-
-            let mut i = record.iter();
+            let mut i = RecordIter::new(b"\"\"\"\"");
             assert!(i.next().unwrap().unwrap().contents_eq(b"\""));
             assert!(i.next().is_none());
         }
 
         #[test]
         fn mixed_fields() {
-            let record = Record::new(b"hey,\"you, \"\"guys\"\"\",be");
-
-            let mut i = record.iter();
+            let mut i = RecordIter::new(b"hey,\"you, \"\"guys\"\"\",be");
             assert!(i.next().unwrap().unwrap().contents_eq(b"hey"));
             assert!(i.next().unwrap().unwrap().contents_eq(b"you, \"guys\""));
             assert!(i.next().unwrap().unwrap().contents_eq(b"be"));
@@ -426,9 +406,7 @@ mod tests {
         #[test]
         fn no_expected_field_count() {
             let mut buf = vec![];
-            Record::new(b"hey,\"you, \"\"guys\"\"\",be")
-                .read(&mut buf, None)
-                .unwrap();
+            parse_fields(b"hey,\"you, \"\"guys\"\"\",be", &mut buf, None).unwrap();
 
             let mut i = buf.iter();
             assert!(i.next().unwrap().contents_eq(b"hey"));
@@ -440,9 +418,7 @@ mod tests {
         #[test]
         fn expected_field_count_success() {
             let mut buf = vec![];
-            Record::new(b"hey,\"you, \"\"guys\"\"\",be")
-                .read(&mut buf, Some(3))
-                .unwrap();
+            parse_fields(b"hey,\"you, \"\"guys\"\"\",be", &mut buf, Some(3)).unwrap();
 
             let mut i = buf.iter();
             assert!(i.next().unwrap().contents_eq(b"hey"));
@@ -454,21 +430,13 @@ mod tests {
         #[test]
         fn expected_field_count_failure_too_many() {
             let mut buf = vec![];
-            assert!(
-                Record::new(b"hey,\"you, \"\"guys\"\"\",be")
-                    .read(&mut buf, Some(2))
-                    .is_err()
-            );
+            assert!(parse_fields(b"hey,\"you, \"\"guys\"\"\",be", &mut buf, Some(2)).is_err());
         }
 
         #[test]
         fn expected_field_count_failure_too_few() {
             let mut buf = vec![];
-            assert!(
-                Record::new(b"hey,\"you, \"\"guys\"\"\",be")
-                    .read(&mut buf, Some(4))
-                    .is_err()
-            );
+            assert!(parse_fields(b"hey,\"you, \"\"guys\"\"\",be", &mut buf, Some(4)).is_err());
         }
     }
 }

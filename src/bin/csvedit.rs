@@ -1,7 +1,10 @@
-use std::io::Write;
+use std::io::{BufReader, Write};
 
 use csvtools::common::arglex;
-fn main() {
+use csvtools::common::error::ErrorContextAdd;
+use csvtools::csv;
+
+fn main() -> csvtools::common::cmd::MainResult {
     let mut has_header = true;
 
     let mut writer = std::io::stdout();
@@ -15,15 +18,12 @@ fn main() {
         match arg {
             Positional(filename) => match reader {
                 Either::A(_) => {
-                    reader = Either::B(std::fs::File::open(filename).unwrap_or_else(|_| {
-                        eprintln!("could not open `{filename}`.");
-                        std::process::exit(1)
-                    }))
+                    reader = Either::B(
+                        std::fs::File::open(filename)
+                            .map_err(|e| e.add_context(format!("openning `{}`", filename)))?,
+                    )
                 }
-                Either::B(_) => {
-                    eprintln!("invalid usage: only one positional argument is accepted.");
-                    std::process::exit(1);
-                }
+                Either::B(_) => Err("only one positional argument is accepted")?,
             },
             Short('c') => {
                 let arg = arg_lexer.consume_arg().unwrap_or_else(|| {
@@ -49,36 +49,25 @@ fn main() {
         }
     }
 
-    let mut csv_file = csvtools::csv::read::File::new(reader);
+    let mut reader = BufReader::new(reader);
 
+    let mut record = Vec::with_capacity(128);
+    let mut fields = Vec::with_capacity(16);
+    let mut next_line = 0;
     let num_fields;
     let out_indices: Vec<_> = if has_header {
-        let header = match csv_file.read() {
-            Ok(Some(header)) => header,
-            Ok(None) => unreachable!("empty files should always return a single empty column name"),
-            Err(_) => {
-                eprintln!("could not read from csv file.");
-                std::process::exit(1);
-            }
-        };
+        let _ = csv::read::read_record(&mut reader, &mut record)?;
 
-        let header: Vec<_> = header
-            .iter()
-            .map(|f| {
-                let Ok(f) = f else {
-                    eprintln!("Bad field");
-                    std::process::exit(1);
-                };
-                f
-            })
-            .collect();
+        csv::read::parse_fields(&mut record, &mut fields, None)
+            .map_err(|e| e.add_line(next_line))?;
+        next_line += 1;
 
-        num_fields = header.len();
+        num_fields = fields.len();
 
         let indices: Vec<_> = columns
             .iter()
             .map(|name| {
-                header
+                fields
                     .iter()
                     .enumerate()
                     .find(|(_, f)| f.contents_eq(name.as_bytes()))
@@ -94,7 +83,7 @@ fn main() {
             if i != 0 {
                 let _ = writer.write_all(&[b',']);
             }
-            header[idx].write_encoded(&mut writer).unwrap();
+            fields[idx].write_encoded(&mut writer).unwrap();
         }
         indices
     } else {
@@ -103,44 +92,30 @@ fn main() {
 
     writer.write_all(&[b'\n']).unwrap();
 
-    loop {
-        match csv_file.read() {
-            Ok(None) => break,
-            Err(_) => {
-                eprintln!("could not read file.");
-                std::process::exit(1);
-            }
-            Ok(Some(record)) => {
-                let fields: Vec<_> = record
-                    .iter()
-                    .map(|f| {
-                        let Ok(f) = f else {
-                            eprint!("Invalid field.");
-                            std::process::exit(1);
-                        };
-                        f
-                    })
-                    .collect();
-                if fields.len() != num_fields {
-                    eprintln!(
-                        "`{}` fields found but `{}` required.",
-                        fields.len(),
-                        num_fields,
-                    );
-                    std::process::exit(1);
-                }
+    fields.clear();
+    fields = fields.iter().map(|_| unreachable!()).collect();
+    record.clear();
 
-                for (i, &idx) in out_indices.iter().enumerate() {
-                    if i != 0 {
-                        let _ = writer.write_all(&[b',']);
-                    }
-                    fields[idx].write_encoded(&mut writer).unwrap();
-                }
+    while csv::read::read_record(&mut reader, &mut record)? > 0 {
+        csv::read::parse_fields(&mut record, &mut fields, Some(num_fields))
+            .map_err(|e| e.add_line(next_line))?;
+        next_line += 1;
 
-                writer.write_all(&[b'\n']).unwrap();
+        for (i, &idx) in out_indices.iter().enumerate() {
+            if i != 0 {
+                let _ = writer.write_all(&[b',']);
             }
+            fields[idx].write_encoded(&mut writer).unwrap();
         }
+
+        writer.write_all(&[b'\n']).unwrap();
+
+        fields.clear();
+        fields = fields.iter().map(|_| unreachable!()).collect();
+        record.clear();
     }
+
+    Ok(())
 }
 
 enum Either<A, B> {
