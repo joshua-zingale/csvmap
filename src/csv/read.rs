@@ -1,9 +1,41 @@
+use super::error::Error;
 use std::io::BufRead;
 
 pub struct File<R: std::io::Read> {
     reader: std::io::BufReader<R>,
     buffer: Vec<u8>,
     first: bool,
+}
+
+/// Reads one CSV record `reader` into `buf`;
+/// does not fail if the record is malformed.
+///
+/// Use the returned [Record] struct to determine
+/// to determine if the record, i.e. any of its
+/// fields, is malformed.
+pub fn read_record<R: std::io::Read>(
+    reader: &mut std::io::BufReader<R>,
+    mut buf: &mut Vec<u8>,
+) -> std::io::Result<usize> {
+    let mut num_quotes = 0;
+    let mut num_read = 0;
+    loop {
+        let last_size = buf.len();
+        num_read += reader.read_until(b'\n', &mut buf)?;
+        num_quotes += buf[last_size..].iter().filter(|&&v| v == b'"').count();
+
+        if num_quotes % 2 == 0 {
+            if buf.ends_with(b"\n") {
+                buf.pop();
+                if buf.ends_with(b"\r") {
+                    buf.pop();
+                }
+            }
+            return Ok(num_read);
+        } else if buf.len() == last_size {
+            return Ok(num_read);
+        }
+    }
 }
 
 impl<T: std::io::Read> File<T> {
@@ -51,6 +83,29 @@ impl<T: std::io::Read> File<T> {
 pub struct Record<'a>(&'a [u8]);
 
 impl<'a> Record<'a> {
+    pub fn read(&self, buf: &mut Vec<Field<'a>>) -> Result<(), super::error::Error> {
+        let mut num_fields = 0;
+        for (i, field) in self.iter().enumerate() {
+            let field = field?;
+            if i >= buf.len() {
+                return Err(Error::FieldCount {
+                    want: buf.len(),
+                    got: i,
+                });
+            }
+            buf[i] = field;
+            num_fields += 1;
+        }
+
+        if num_fields < buf.len() {
+            return Err(Error::FieldCount {
+                want: buf.len(),
+                got: num_fields,
+            });
+        }
+
+        Ok(())
+    }
     pub fn iter(&self) -> RecordIter<'a> {
         RecordIter {
             rest: self.0,
@@ -65,7 +120,7 @@ pub struct RecordIter<'a> {
 }
 
 impl<'a> Iterator for RecordIter<'a> {
-    type Item = Result<Field<'a>, String>;
+    type Item = Result<Field<'a>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if !self.is_next {
@@ -95,11 +150,11 @@ impl<'a> Iterator for RecordIter<'a> {
                             rest = &rest[quote_pos + 2..];
                         }
                         Some(&c) => {
-                            return Some(Err(format!("unexpected byte `0x{:X}`", c)));
+                            return Some(Err(Error::InvalidByte(c)));
                         }
                     }
                 } else {
-                    return Some(Err("unclosed double quote".to_string()));
+                    return Some(Err(Error::UnclosedQuote));
                 }
             }
 
@@ -115,11 +170,9 @@ impl<'a> Iterator for RecordIter<'a> {
                 }
                 (None, Some(_)) => {
                     self.is_next = false;
-                    Some(Err("double quote in unescaped field".to_string()))
+                    Some(Err(Error::DoubleQuoteInUnescapedField))
                 }
-                (Some(cp), Some(qp)) if qp < cp => {
-                    Some(Err("double quote in unescaped field".to_string()))
-                }
+                (Some(cp), Some(qp)) if qp < cp => Some(Err(Error::DoubleQuoteInUnescapedField)),
                 (Some(cp), _) => {
                     let field = _Field::Clean(&self.rest[..cp]);
                     self.rest = &self.rest[cp + 1..];
@@ -220,6 +273,55 @@ impl<'a> File<&'a [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod read_record {
+        use super::*;
+
+        fn bbr(bytes: &[u8]) -> std::io::BufReader<std::io::Cursor<&[u8]>> {
+            std::io::BufReader::new(std::io::Cursor::new(bytes))
+        }
+
+        #[test]
+        fn reads_nothing_from_empty_reader() {
+            let mut buf = vec![];
+            let n = read_record(&mut bbr(b""), &mut buf).unwrap();
+
+            assert_eq!(0, n);
+            assert_eq!(b"", buf.as_slice())
+        }
+
+        #[test]
+        fn reads_two_records_with_lf() {
+            let mut buf = vec![];
+            let mut reader = bbr(b"a,b,c\n1,2,3");
+            let n = read_record(&mut reader, &mut buf).unwrap();
+
+            assert_eq!(6, n);
+            assert_eq!(b"a,b,c", buf.as_slice());
+
+            buf.clear();
+            let n = read_record(&mut reader, &mut buf).unwrap();
+
+            assert_eq!(5, n);
+            assert_eq!(b"1,2,3", buf.as_slice());
+        }
+
+        #[test]
+        fn reads_two_records_with_crlf() {
+            let mut buf = vec![];
+            let mut reader = bbr(b"a,b,c\r\n1,2,3");
+            let n = read_record(&mut reader, &mut buf).unwrap();
+
+            assert_eq!(7, n);
+            assert_eq!(b"a,b,c", buf.as_slice());
+
+            buf.clear();
+            let n = read_record(&mut reader, &mut buf).unwrap();
+
+            assert_eq!(5, n);
+            assert_eq!(b"1,2,3", buf.as_slice());
+        }
+    }
 
     #[test]
     fn reads_one_unquoted_row() {
