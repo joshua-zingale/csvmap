@@ -21,7 +21,13 @@ pub fn read_record<R: std::io::Read>(
     let mut num_read = 0;
     loop {
         let last_size = buf.len();
-        num_read += reader.read_until(b'\n', &mut buf)?;
+        let chunk_size = reader.read_until(b'\n', &mut buf)?;
+        num_read += chunk_size;
+
+        if chunk_size == 0 {
+            return Ok(num_read);
+        }
+
         num_quotes += buf[last_size..].iter().filter(|&&v| v == b'"').count();
 
         if num_quotes % 2 == 0 {
@@ -31,8 +37,6 @@ pub fn read_record<R: std::io::Read>(
                     buf.pop();
                 }
             }
-            return Ok(num_read);
-        } else if buf.len() == last_size {
             return Ok(num_read);
         }
     }
