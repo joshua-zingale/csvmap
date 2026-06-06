@@ -5,6 +5,18 @@ pub enum Error {
     UnclosedQuote,
     InvalidByte(u8),
     DoubleQuoteInUnescapedField,
+    LineError(usize, Box<Error>),
+    FieldError(usize, Box<Error>),
+}
+
+impl Error {
+    pub fn add_line(self, line: usize) -> Self {
+        Error::LineError(line, Box::new(self))
+    }
+
+    pub fn add_field(self, field: usize) -> Self {
+        Error::FieldError(field, Box::new(self))
+    }
 }
 
 impl From<std::io::Error> for Error {
@@ -20,11 +32,11 @@ impl std::fmt::Display for Error {
         use Error::*;
         match self {
             FieldCount { want, got } => write!(f, "expected `{want}` fields but found `{got}`"),
-            IO(e) => e.fmt(f),
+            IO(e) => write!(f, "{e}"),
             UnclosedQuote => write!(f, "unclosed quote"),
             InvalidByte(b) => {
                 if b.is_ascii() {
-                    write!(f, "invalid character `{}`", b.to_string())
+                    write!(f, "invalid character `{}`", *b as char)
                 } else {
                     write!(f, "unexpected byte `0x{:X}`", *b)
                 }
@@ -32,6 +44,8 @@ impl std::fmt::Display for Error {
             DoubleQuoteInUnescapedField => {
                 write!(f, "double quote in unescaped field")
             }
+            LineError(line, e) => write!(f, "line {line}: {e}"),
+            FieldError(field, e) => write!(f, "field {field}: {e}"),
         }
     }
 }

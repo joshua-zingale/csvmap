@@ -63,7 +63,7 @@ impl<'a> Record<'a> {
             {
                 return Err(Error::FieldCount { want: n, got: i });
             }
-            let field = field?;
+            let field = field.map_err(|e| e.add_field(i))?;
             buf.push(field);
             fields_read += 1;
         }
