@@ -58,7 +58,7 @@ fn main() -> csvtools::common::cmd::MainResult {
         let _ = csv::read::read_record(&mut reader, &mut header)?;
 
         csv::read::parse_fields(&mut header, &mut header_fields, None)
-            .map_err(|e| e.add_line(0))?;
+            .map_err(|e| e.record_num(0))?;
 
         num_fields = header_fields.len();
 
@@ -91,7 +91,7 @@ fn main() -> csvtools::common::cmd::MainResult {
     writeln!(writer)?;
 
     let mut reader = csv::read::RecordReader::new(reader, Some(num_fields));
-    reader.next_line += 1;
+    reader.next_record_num += 1;
     while let Some(fields) = reader.read()? {
         for (i, &idx) in out_indices.iter().enumerate() {
             if i != 0 {

@@ -1,4 +1,4 @@
-use super::error::Error;
+use super::error::{Error, ErrorKind};
 use std::io::BufRead;
 
 /// Reads one CSV record `reader` into `buf`;
@@ -44,7 +44,7 @@ where
     record_buf: Vec<u8>,
     fields_buf: Vec<Field<'a>>,
     expected_fields: Option<usize>,
-    pub next_line: usize,
+    pub next_record_num: usize,
     // _phantom: std::marker::PhantomData<&'a R>,
 }
 
@@ -61,7 +61,7 @@ where
                 Some(n) => Vec::with_capacity(n),
             },
             expected_fields,
-            next_line: 1,
+            next_record_num: 1,
         }
     }
 
@@ -87,18 +87,18 @@ where
                         let fields_buf: &mut Vec<Field<'b>> =
                             std::mem::transmute(&mut self.fields_buf);
                         parse_fields(&self.record_buf, fields_buf, self.expected_fields)
-                            .map_err(|e| e.add_line(self.next_line))?
+                            .map_err(|e| e.record_num(self.next_record_num))?
                     }
                 };
 
                 if self.expected_fields.is_none() {
                     self.expected_fields = Some(self.fields_buf.len())
                 }
-                self.next_line += 1;
+                self.next_record_num += 1;
 
                 Ok(Some(self.fields_buf.as_slice()))
             }
-            Err(e) => Err(Error::IO(e).add_line(self.next_line)),
+            Err(e) => Err(Error::new(ErrorKind::IO(e)).record_num(self.next_record_num)),
         }
     }
 }
@@ -120,9 +120,9 @@ pub fn parse_fields<'a>(
         if let Some(n) = expected_fields
             && i >= n
         {
-            return Err(Error::FieldCount { want: n, got: i });
+            return Err(ErrorKind::FieldCount { want: n, got: i }.into());
         }
-        let field = field.map_err(|e| e.add_field(i))?;
+        let field = field.map_err(|e| e.field_num(i))?;
         buf.push(field);
         fields_read += 1;
     }
@@ -130,10 +130,11 @@ pub fn parse_fields<'a>(
     if let Some(n) = expected_fields
         && n > fields_read
     {
-        return Err(Error::FieldCount {
+        return Err(ErrorKind::FieldCount {
             want: n,
             got: fields_read,
-        });
+        }
+        .into());
     }
 
     Ok(())
@@ -185,11 +186,11 @@ impl<'a> Iterator for Fields<'a> {
                             rest = &rest[quote_pos + 2..];
                         }
                         Some(&c) => {
-                            return Some(Err(Error::NonCommaAfterQuote(c)));
+                            return Some(Err(ErrorKind::NonCommaAfterQuote(c).into()));
                         }
                     }
                 } else {
-                    return Some(Err(Error::UnclosedQuote));
+                    return Some(Err(ErrorKind::UnclosedQuote.into()));
                 }
             }
 
@@ -205,9 +206,11 @@ impl<'a> Iterator for Fields<'a> {
                 }
                 (None, Some(_)) => {
                     self.is_next = false;
-                    Some(Err(Error::DoubleQuoteInUnescapedField))
+                    Some(Err(ErrorKind::DoubleQuoteInUnescapedField.into()))
                 }
-                (Some(cp), Some(qp)) if qp < cp => Some(Err(Error::DoubleQuoteInUnescapedField)),
+                (Some(cp), Some(qp)) if qp < cp => {
+                    Some(Err(ErrorKind::DoubleQuoteInUnescapedField.into()))
+                }
                 (Some(cp), _) => {
                     let field = _Field::Clean(&self.rest[..cp]);
                     self.rest = &self.rest[cp + 1..];
