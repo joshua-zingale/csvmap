@@ -5,6 +5,7 @@ pub enum Error {
     UnclosedQuote,
     InvalidByte(u8),
     DoubleQuoteInUnescapedField,
+    NonCommaAfterQuote(u8),
     LineError(usize, Box<Error>),
     FieldError(usize, Box<Error>),
 }
@@ -46,6 +47,11 @@ impl std::fmt::Display for Error {
             }
             LineError(line, e) => write!(f, "line {line}: {e}"),
             FieldError(field, e) => write!(f, "field {field}: {e}"),
+            NonCommaAfterQuote(c) => write!(
+                f,
+                "expected comma or newline after double quote but found `{}`",
+                *c as char
+            ),
         }
     }
 }

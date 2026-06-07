@@ -51,29 +51,27 @@ fn main() -> csvtools::common::cmd::MainResult {
 
     let mut reader = BufReader::new(reader);
 
-    let mut record = Vec::with_capacity(128);
-    let mut fields = Vec::with_capacity(16);
-    let mut next_line = 0;
+    let mut header = Vec::with_capacity(128);
+    let mut header_fields = Vec::with_capacity(16);
     let num_fields;
     let out_indices: Vec<_> = if has_header {
-        let _ = csv::read::read_record(&mut reader, &mut record)?;
+        let _ = csv::read::read_record(&mut reader, &mut header)?;
 
-        csv::read::parse_fields(&mut record, &mut fields, None)
-            .map_err(|e| e.add_line(next_line))?;
-        next_line += 1;
+        csv::read::parse_fields(&mut header, &mut header_fields, None)
+            .map_err(|e| e.add_line(0))?;
 
-        num_fields = fields.len();
+        num_fields = header_fields.len();
 
         let indices: Vec<_> = columns
             .iter()
             .map(|name| {
-                fields
+                header_fields
                     .iter()
                     .enumerate()
                     .find(|(_, f)| f.contents_eq(name.as_bytes()))
                     .map(|(i, _)| i)
                     .unwrap_or_else(|| {
-                        eprintln!("Could not find field `{}`", name);
+                        eprintln!("Error: no column named `{}`", name);
                         std::process::exit(1);
                     })
             })
@@ -81,38 +79,27 @@ fn main() -> csvtools::common::cmd::MainResult {
 
         for (i, &idx) in indices.iter().enumerate() {
             if i != 0 {
-                let _ = writer.write_all(&[b',']);
+                writer.write_all(&[b','])?;
             }
-            fields[idx].write_encoded(&mut writer).unwrap();
+            header_fields[idx].write_encoded(&mut writer)?;
         }
         indices
     } else {
         todo!()
     };
 
-    writer.write_all(&[b'\n']).unwrap();
+    writeln!(writer)?;
 
-    fields.clear();
-    fields = fields.iter().map(|_| unreachable!()).collect();
-    record.clear();
-
-    while csv::read::read_record(&mut reader, &mut record)? > 0 {
-        csv::read::parse_fields(&mut record, &mut fields, Some(num_fields))
-            .map_err(|e| e.add_line(next_line))?;
-        next_line += 1;
-
+    let mut reader = csv::read::RecordReader::new(reader, Some(num_fields));
+    reader.next_line += 1;
+    while let Some(fields) = reader.read()? {
         for (i, &idx) in out_indices.iter().enumerate() {
             if i != 0 {
                 let _ = writer.write_all(&[b',']);
             }
-            fields[idx].write_encoded(&mut writer).unwrap();
+            fields[idx].write_encoded(&mut writer)?;
         }
-
-        writer.write_all(&[b'\n']).unwrap();
-
-        fields.clear();
-        fields = fields.iter().map(|_| unreachable!()).collect();
-        record.clear();
+        writeln!(writer)?;
     }
 
     Ok(())

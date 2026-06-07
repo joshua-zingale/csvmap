@@ -36,6 +36,73 @@ pub fn read_record<R: std::io::Read>(
     }
 }
 
+pub struct RecordReader<'a, R>
+where
+    R: std::io::Read,
+{
+    reader: std::io::BufReader<R>,
+    record_buf: Vec<u8>,
+    fields_buf: Vec<Field<'a>>,
+    expected_fields: Option<usize>,
+    pub next_line: usize,
+    // _phantom: std::marker::PhantomData<&'a R>,
+}
+
+impl<'a, R> RecordReader<'a, R>
+where
+    R: std::io::Read,
+{
+    pub fn new(reader: std::io::BufReader<R>, expected_fields: Option<usize>) -> Self {
+        RecordReader {
+            reader: reader,
+            record_buf: Vec::new(),
+            fields_buf: match expected_fields {
+                None => Vec::new(),
+                Some(n) => Vec::with_capacity(n),
+            },
+            expected_fields,
+            next_line: 1,
+        }
+    }
+
+    pub fn read<'b>(&'b mut self) -> Result<Option<&'b [Field<'b>]>, Error> {
+        self.record_buf.clear();
+        self.fields_buf.clear();
+        match read_record(&mut self.reader, &mut self.record_buf) {
+            Ok(0) => Ok(None),
+            Ok(_) => {
+                let _ = {
+                    // The data in `fields_buf` lives for 'a,
+                    // but `record_buf`'s data is 'b, which
+                    // is smaller than 'a.
+                    // The BC ergo thinks that `record_buf`
+                    // may expire before `fields_buf`
+                    // in the context of the parse_fields
+                    // call.
+                    // This however is not the case because
+                    // we expire the returned Fields
+                    // with 'b, ensuring that the caller
+                    // will never access state Field data.
+                    unsafe {
+                        let fields_buf: &mut Vec<Field<'b>> =
+                            std::mem::transmute(&mut self.fields_buf);
+                        parse_fields(&self.record_buf, fields_buf, self.expected_fields)
+                            .map_err(|e| e.add_line(self.next_line))?
+                    }
+                };
+
+                if self.expected_fields.is_none() {
+                    self.expected_fields = Some(self.fields_buf.len())
+                }
+                self.next_line += 1;
+
+                Ok(Some(self.fields_buf.as_slice()))
+            }
+            Err(e) => Err(Error::IO(e).add_line(self.next_line)),
+        }
+    }
+}
+
 /// Reads `expected_fields` fields from a `record` into `buf`.
 ///
 /// If `expected_fields` is `None`, any number of fields
@@ -49,7 +116,7 @@ pub fn parse_fields<'a>(
     expected_fields: Option<usize>,
 ) -> Result<(), Error> {
     let mut fields_read = 0;
-    for (i, field) in RecordIter::new(record).enumerate() {
+    for (i, field) in Fields::new(record).enumerate() {
         if let Some(n) = expected_fields
             && i >= n
         {
@@ -73,21 +140,21 @@ pub fn parse_fields<'a>(
 }
 
 /// Iterates over the fields in a Record.
-pub struct RecordIter<'a> {
+pub struct Fields<'a> {
     rest: &'a [u8],
     is_next: bool,
 }
 
-impl<'a> RecordIter<'a> {
+impl<'a> Fields<'a> {
     pub fn new(record: &'a [u8]) -> Self {
-        RecordIter {
+        Fields {
             rest: record,
             is_next: true,
         }
     }
 }
 
-impl<'a> Iterator for RecordIter<'a> {
+impl<'a> Iterator for Fields<'a> {
     type Item = Result<Field<'a>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -118,7 +185,7 @@ impl<'a> Iterator for RecordIter<'a> {
                             rest = &rest[quote_pos + 2..];
                         }
                         Some(&c) => {
-                            return Some(Err(Error::InvalidByte(c)));
+                            return Some(Err(Error::NonCommaAfterQuote(c)));
                         }
                     }
                 } else {
@@ -232,12 +299,11 @@ type EscapedIter<'a> = Vec<&'a [u8]>;
 mod tests {
     use super::*;
 
+    fn bbr(bytes: &[u8]) -> std::io::BufReader<std::io::Cursor<&[u8]>> {
+        std::io::BufReader::new(std::io::Cursor::new(bytes))
+    }
     mod read_record {
         use super::*;
-
-        fn bbr(bytes: &[u8]) -> std::io::BufReader<std::io::Cursor<&[u8]>> {
-            std::io::BufReader::new(std::io::Cursor::new(bytes))
-        }
 
         #[test]
         fn nothing_from_empty_reader() {
@@ -347,7 +413,7 @@ mod tests {
 
         #[test]
         fn empty_string_to_empty_field() {
-            let mut i = RecordIter::new(b"");
+            let mut i = Fields::new(b"");
             let first = i.next().unwrap().unwrap();
             assert!(first.contents_eq(b""));
             assert!(i.next().is_none());
@@ -355,7 +421,7 @@ mod tests {
 
         #[test]
         fn single_non_empty_field() {
-            let mut i = RecordIter::new(b"hfo d ");
+            let mut i = Fields::new(b"hfo d ");
             let first = i.next().unwrap().unwrap();
             assert!(first.contents_eq(b"hfo d "));
             assert!(i.next().is_none());
@@ -363,7 +429,7 @@ mod tests {
 
         #[test]
         fn three_fields() {
-            let mut i = RecordIter::new(b"hfo, d, ");
+            let mut i = Fields::new(b"hfo, d, ");
             assert!(i.next().unwrap().unwrap().contents_eq(b"hfo"));
             assert!(i.next().unwrap().unwrap().contents_eq(b" d"));
             assert!(i.next().unwrap().unwrap().contents_eq(b" "));
@@ -372,27 +438,27 @@ mod tests {
 
         #[test]
         fn empty_quoted_field() {
-            let mut i = RecordIter::new(b"\"\"");
+            let mut i = Fields::new(b"\"\"");
             assert!(i.next().unwrap().unwrap().contents_eq(b""));
             assert!(i.next().is_none());
         }
 
         #[test]
         fn quoted_field_with_comma_therein() {
-            let mut i = RecordIter::new(b"\",\"");
+            let mut i = Fields::new(b"\",\"");
             assert!(i.next().unwrap().unwrap().contents_eq(b","));
             assert!(i.next().is_none());
         }
         #[test]
         fn quoted_field_with_escaped_quote() {
-            let mut i = RecordIter::new(b"\"\"\"\"");
+            let mut i = Fields::new(b"\"\"\"\"");
             assert!(i.next().unwrap().unwrap().contents_eq(b"\""));
             assert!(i.next().is_none());
         }
 
         #[test]
         fn mixed_fields() {
-            let mut i = RecordIter::new(b"hey,\"you, \"\"guys\"\"\",be");
+            let mut i = Fields::new(b"hey,\"you, \"\"guys\"\"\",be");
             assert!(i.next().unwrap().unwrap().contents_eq(b"hey"));
             assert!(i.next().unwrap().unwrap().contents_eq(b"you, \"guys\""));
             assert!(i.next().unwrap().unwrap().contents_eq(b"be"));
@@ -400,7 +466,7 @@ mod tests {
         }
     }
 
-    mod record_read {
+    mod parse_fields {
         use super::*;
 
         #[test]
@@ -437,6 +503,58 @@ mod tests {
         fn expected_field_count_failure_too_few() {
             let mut buf = vec![];
             assert!(parse_fields(b"hey,\"you, \"\"guys\"\"\",be", &mut buf, Some(4)).is_err());
+        }
+    }
+
+    mod record_reader {
+        use super::*;
+        fn vec_ify<'a>(fs: &[Field<'a>]) -> Vec<Vec<u8>> {
+            fs.iter()
+                .map(|f| {
+                    let mut v = vec![];
+                    f.write_to(&mut v).unwrap();
+                    v
+                })
+                .collect()
+        }
+        #[test]
+        fn no_expected_field_count() {
+            let mut r = RecordReader::new(bbr(b"1,2,3\na,b,c"), None);
+
+            let fields = vec_ify(r.read().unwrap().unwrap());
+            assert_eq!(fields, vec![b"1", b"2", b"3"]);
+            let fields = vec_ify(r.read().unwrap().unwrap());
+            assert_eq!(fields, vec![b"a", b"b", b"c"]);
+        }
+
+        #[test]
+        fn no_expected_field_count_fail() {
+            let mut r = RecordReader::new(bbr(b"1,2,3\na,b,c,d"), None);
+
+            let fields = vec_ify(r.read().unwrap().unwrap());
+            assert_eq!(fields, vec![b"1", b"2", b"3"]);
+            assert!(r.read().is_err());
+        }
+
+        #[test]
+        fn expected_field_count() {
+            let mut r = RecordReader::new(bbr(b"1,2,3\na,b,c"), Some(3));
+
+            let fields = vec_ify(r.read().unwrap().unwrap());
+            assert_eq!(fields, vec![b"1", b"2", b"3"]);
+            let fields = vec_ify(r.read().unwrap().unwrap());
+            assert_eq!(fields, vec![b"a", b"b", b"c"]);
+        }
+
+        #[test]
+        fn expected_field_count_failure() {
+            let mut r = RecordReader::new(bbr(b"1,2,3,4\na,b,c"), Some(3));
+            assert!(r.read().is_err());
+
+            let mut r = RecordReader::new(bbr(b"1,2,3\na,b"), Some(3));
+            let fields = vec_ify(r.read().unwrap().unwrap());
+            assert_eq!(fields, vec![b"1", b"2", b"3"]);
+            assert!(r.read().is_err());
         }
     }
 }
