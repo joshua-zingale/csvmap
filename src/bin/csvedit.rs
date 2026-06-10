@@ -26,25 +26,21 @@ fn main() -> csvtools::common::cmd::MainResult {
                 Either::B(_) => Err("only one positional argument is accepted")?,
             },
             Short('c') => {
-                let arg = arg_lexer.consume_arg().unwrap_or_else(|| {
-                    eprintln!("`-c` expects an argument");
-                    std::process::exit(1);
-                });
+                let Some(arg) = arg_lexer.consume_arg() else {
+                    Err("`-c` expects an argument")?
+                };
                 columns.push(arg);
             }
             Long("header") => has_header = true,
             Short('n') | Long("no-header") => has_header = false,
             Short(c) => {
-                eprintln!("invalid option `-{c}`");
-                std::process::exit(1);
+                Err(format!("invalid option `-{c}`"))?;
             }
             Long(s) => {
-                eprintln!("invalid option `--{s}`");
-                std::process::exit(1);
+                Err(format!("invalid option `--{s}`"))?;
             }
             LongArg(s, a) => {
-                eprintln!("invalid option with argument `--{s}={a}`");
-                std::process::exit(1);
+                Err(format!("invalid option with argument `--{s}={a}`"))?;
             }
         }
     }
