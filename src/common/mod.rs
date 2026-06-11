@@ -1,4 +1,4 @@
-pub mod arglex;
+pub mod argparse;
 pub mod cmd;
 pub mod error;
 pub mod util;

@@ -7,7 +7,7 @@ where
 }
 
 #[derive(PartialEq, Eq, Debug)]
-pub enum Arg<'a> {
+pub enum ArgToken<'a> {
     Short(char),
     Long(&'a str),
     LongArg(&'a str, &'a str),
@@ -44,27 +44,27 @@ impl<'a, T> std::iter::Iterator for ArgLexer<'a, T>
 where
     T: std::iter::Iterator<Item = &'a str>,
 {
-    type Item = Arg<'a>;
+    type Item = ArgToken<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(mut remaining) = self.remaining.take() {
             if let Some(c) = remaining.next() {
                 self.remaining = Some(remaining);
-                return Some(Arg::Short(c));
+                return Some(ArgToken::Short(c));
             }
         }
         Some(match self.args.next()?.as_bytes() {
-            b"" => Arg::Positional(""),
+            b"" => ArgToken::Positional(""),
             s if s == b"-" || s == b"--" => {
-                Arg::Positional(unsafe { std::str::from_utf8_unchecked(s) })
+                ArgToken::Positional(unsafe { std::str::from_utf8_unchecked(s) })
             }
             [b'-', b'-', rest @ ..] => {
                 let s = unsafe { std::str::from_utf8_unchecked(rest) };
 
                 if let Some((param, arg)) = s.split_once('=') {
-                    Arg::LongArg(param, arg)
+                    ArgToken::LongArg(param, arg)
                 } else {
-                    Arg::Long(s)
+                    ArgToken::Long(s)
                 }
             }
             [b'-', rest @ ..] => {
@@ -74,10 +74,10 @@ where
 
                 let c = chars.next().expect("already checked");
                 self.remaining = Some(chars);
-                Arg::Short(c)
+                ArgToken::Short(c)
             }
 
-            s => Arg::Positional(unsafe { std::str::from_utf8_unchecked(s) }),
+            s => ArgToken::Positional(unsafe { std::str::from_utf8_unchecked(s) }),
         })
     }
 }
@@ -97,7 +97,10 @@ mod tests {
     fn positional() {
         let args = vec!["hello, my darling"];
         let mut iter = ArgLexer::new(args.into_iter());
-        assert_eq!(Arg::Positional("hello, my darling"), iter.next().unwrap());
+        assert_eq!(
+            ArgToken::Positional("hello, my darling"),
+            iter.next().unwrap()
+        );
         assert_eq!(None, iter.next())
     }
 
@@ -105,9 +108,9 @@ mod tests {
     fn positionals() {
         let args = vec!["hello", "my", "darling"];
         let mut iter = ArgLexer::new(args.into_iter());
-        assert_eq!(Arg::Positional("hello"), iter.next().unwrap());
-        assert_eq!(Arg::Positional("my"), iter.next().unwrap());
-        assert_eq!(Arg::Positional("darling"), iter.next().unwrap());
+        assert_eq!(ArgToken::Positional("hello"), iter.next().unwrap());
+        assert_eq!(ArgToken::Positional("my"), iter.next().unwrap());
+        assert_eq!(ArgToken::Positional("darling"), iter.next().unwrap());
         assert_eq!(None, iter.next())
     }
 
@@ -115,7 +118,7 @@ mod tests {
     fn single_dash_is_positional() {
         let args = vec!["-"];
         let mut iter = ArgLexer::new(args.into_iter());
-        assert_eq!(Arg::Positional("-"), iter.next().unwrap());
+        assert_eq!(ArgToken::Positional("-"), iter.next().unwrap());
         assert_eq!(None, iter.next())
     }
 
@@ -123,7 +126,7 @@ mod tests {
     fn double_dash_is_positional() {
         let args = vec!["--"];
         let mut iter = ArgLexer::new(args.into_iter());
-        assert_eq!(Arg::Positional("--"), iter.next().unwrap());
+        assert_eq!(ArgToken::Positional("--"), iter.next().unwrap());
         assert_eq!(None, iter.next())
     }
 
@@ -131,7 +134,7 @@ mod tests {
     fn short() {
         let args = vec!["-a"];
         let mut iter = ArgLexer::new(args.into_iter());
-        assert_eq!(Arg::Short('a'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('a'), iter.next().unwrap());
         assert_eq!(None, iter.next())
     }
 
@@ -139,10 +142,10 @@ mod tests {
     fn shorts_together() {
         let args = vec!["-abcd"];
         let mut iter = ArgLexer::new(args.into_iter());
-        assert_eq!(Arg::Short('a'), iter.next().unwrap());
-        assert_eq!(Arg::Short('b'), iter.next().unwrap());
-        assert_eq!(Arg::Short('c'), iter.next().unwrap());
-        assert_eq!(Arg::Short('d'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('a'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('b'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('c'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('d'), iter.next().unwrap());
         assert_eq!(None, iter.next())
     }
 
@@ -150,10 +153,10 @@ mod tests {
     fn shorts_separate() {
         let args = vec!["-a", "-b", "-c", "-d"];
         let mut iter = ArgLexer::new(args.into_iter());
-        assert_eq!(Arg::Short('a'), iter.next().unwrap());
-        assert_eq!(Arg::Short('b'), iter.next().unwrap());
-        assert_eq!(Arg::Short('c'), iter.next().unwrap());
-        assert_eq!(Arg::Short('d'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('a'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('b'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('c'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('d'), iter.next().unwrap());
         assert_eq!(None, iter.next())
     }
 
@@ -161,7 +164,7 @@ mod tests {
     fn long() {
         let args = vec!["--long-boy"];
         let mut iter = ArgLexer::new(args.into_iter());
-        assert_eq!(Arg::Long("long-boy"), iter.next().unwrap());
+        assert_eq!(ArgToken::Long("long-boy"), iter.next().unwrap());
         assert_eq!(None, iter.next())
     }
 
@@ -169,9 +172,9 @@ mod tests {
     fn longs() {
         let args = vec!["--long-boy", "--long boy", "--loooonger-boy"];
         let mut iter = ArgLexer::new(args.into_iter());
-        assert_eq!(Arg::Long("long-boy"), iter.next().unwrap());
-        assert_eq!(Arg::Long("long boy"), iter.next().unwrap());
-        assert_eq!(Arg::Long("loooonger-boy"), iter.next().unwrap());
+        assert_eq!(ArgToken::Long("long-boy"), iter.next().unwrap());
+        assert_eq!(ArgToken::Long("long boy"), iter.next().unwrap());
+        assert_eq!(ArgToken::Long("loooonger-boy"), iter.next().unwrap());
         assert_eq!(None, iter.next())
     }
 
@@ -179,7 +182,10 @@ mod tests {
     fn long_arg_together() {
         let args = vec!["--long-boy=Waluigi"];
         let mut iter = ArgLexer::new(args.into_iter());
-        assert_eq!(Arg::LongArg("long-boy", "Waluigi"), iter.next().unwrap());
+        assert_eq!(
+            ArgToken::LongArg("long-boy", "Waluigi"),
+            iter.next().unwrap()
+        );
         assert_eq!(None, iter.next())
     }
 
@@ -187,8 +193,8 @@ mod tests {
     fn long_args_together() {
         let args = vec!["--fat-boy=Wario", "--attack=mario"];
         let mut iter = ArgLexer::new(args.into_iter());
-        assert_eq!(Arg::LongArg("fat-boy", "Wario"), iter.next().unwrap());
-        assert_eq!(Arg::LongArg("attack", "mario"), iter.next().unwrap());
+        assert_eq!(ArgToken::LongArg("fat-boy", "Wario"), iter.next().unwrap());
+        assert_eq!(ArgToken::LongArg("attack", "mario"), iter.next().unwrap());
         assert_eq!(None, iter.next())
     }
 
@@ -197,11 +203,11 @@ mod tests {
         let args = vec!["-ab", "pos", "--fat-boy", "--attack=mario"];
         let mut iter = ArgLexer::new(args.into_iter());
 
-        assert_eq!(Arg::Short('a'), iter.next().unwrap());
-        assert_eq!(Arg::Short('b'), iter.next().unwrap());
-        assert_eq!(Arg::Positional("pos"), iter.next().unwrap());
-        assert_eq!(Arg::Long("fat-boy"), iter.next().unwrap());
-        assert_eq!(Arg::LongArg("attack", "mario"), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('a'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('b'), iter.next().unwrap());
+        assert_eq!(ArgToken::Positional("pos"), iter.next().unwrap());
+        assert_eq!(ArgToken::Long("fat-boy"), iter.next().unwrap());
+        assert_eq!(ArgToken::LongArg("attack", "mario"), iter.next().unwrap());
         assert_eq!(None, iter.next())
     }
 
@@ -228,7 +234,7 @@ mod tests {
         let args = vec!["-ibackup"];
         let mut iter = ArgLexer::new(args.into_iter());
 
-        assert_eq!(Arg::Short('i'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('i'), iter.next().unwrap());
         assert_eq!("backup", iter.consume_arg().unwrap());
         assert_eq!(None, iter.next())
     }
@@ -238,10 +244,10 @@ mod tests {
         let args = vec!["-vabibackup"];
         let mut iter = ArgLexer::new(args.into_iter());
 
-        assert_eq!(Arg::Short('v'), iter.next().unwrap());
-        assert_eq!(Arg::Short('a'), iter.next().unwrap());
-        assert_eq!(Arg::Short('b'), iter.next().unwrap());
-        assert_eq!(Arg::Short('i'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('v'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('a'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('b'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('i'), iter.next().unwrap());
         assert_eq!("backup", iter.consume_arg().unwrap());
         assert_eq!(None, iter.next())
     }
@@ -251,12 +257,12 @@ mod tests {
         let args = vec!["-ibackup", "file", "--argname", "arg", "file2"];
         let mut iter = ArgLexer::new(args.into_iter());
 
-        assert_eq!(Arg::Short('i'), iter.next().unwrap());
+        assert_eq!(ArgToken::Short('i'), iter.next().unwrap());
         assert_eq!("backup", iter.consume_arg().unwrap());
-        assert_eq!(Arg::Positional("file"), iter.next().unwrap());
-        assert_eq!(Arg::Long("argname"), iter.next().unwrap());
+        assert_eq!(ArgToken::Positional("file"), iter.next().unwrap());
+        assert_eq!(ArgToken::Long("argname"), iter.next().unwrap());
         assert_eq!("arg", iter.consume_arg().unwrap());
-        assert_eq!(Arg::Positional("file2"), iter.next().unwrap());
+        assert_eq!(ArgToken::Positional("file2"), iter.next().unwrap());
         assert_eq!(None, iter.next())
     }
 
@@ -290,7 +296,7 @@ mod tests {
         let mut context = "";
         let mut pos = vec![];
         while let Some(arg) = iter.next() {
-            use Arg::*;
+            use ArgToken::*;
             match arg {
                 Short('a') => a = true,
                 Short('b') => b = true,

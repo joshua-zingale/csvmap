@@ -1,6 +1,6 @@
 use std::io::{BufReader, Write};
 
-use csvtools::common::arglex;
+use csvtools::common::argparse;
 use csvtools::common::error::ErrorContextAdd;
 use csvtools::csv;
 
@@ -12,9 +12,9 @@ fn main() -> csvtools::common::cmd::MainResult {
     let mut columns = Vec::new();
     let args: Vec<_> = std::env::args().collect();
     let arg_slices = args[1..].iter().map(|s| s.as_str());
-    let mut arg_lexer = arglex::ArgLexer::new(arg_slices);
-    while let Some(arg) = arg_lexer.next() {
-        use arglex::Arg::*;
+    let mut arg_parser = argparse::ArgParser::new(arg_slices);
+    while let Some(arg) = arg_parser.read()? {
+        use argparse::Arg::*;
         match arg {
             Positional(filename) => match reader {
                 Either::A(_) => {
@@ -25,11 +25,8 @@ fn main() -> csvtools::common::cmd::MainResult {
                 }
                 Either::B(_) => Err("only one positional argument is accepted")?,
             },
-            Short('c') => {
-                let Some(arg) = arg_lexer.consume_arg() else {
-                    Err("`-c` expects an argument")?
-                };
-                columns.push(arg);
+            Long("column") | Short('c') => {
+                columns.push(arg_parser.consume_arg()?);
             }
             Long("header") => has_header = true,
             Short('n') | Long("no-header") => has_header = false,
@@ -38,9 +35,6 @@ fn main() -> csvtools::common::cmd::MainResult {
             }
             Long(s) => {
                 Err(format!("invalid option `--{s}`"))?;
-            }
-            LongArg(s, a) => {
-                Err(format!("invalid option with argument `--{s}={a}`"))?;
             }
         }
     }
@@ -87,7 +81,6 @@ fn main() -> csvtools::common::cmd::MainResult {
     writeln!(writer)?;
 
     let mut reader = csv::read::RecordReader::new(reader, Some(num_fields));
-    reader.next_record_num += 1;
     while let Some(fields) = reader.read()? {
         for (i, &idx) in out_indices.iter().enumerate() {
             if i != 0 {
