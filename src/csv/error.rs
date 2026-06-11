@@ -81,7 +81,9 @@ impl std::fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use ErrorKind::*;
         match self {
-            FieldCount { want, got } => write!(f, "expected `{want}` fields but found `{got}`"),
+            FieldCount { want, got } => {
+                write!(f, "expected `{want}` fields but found `{}`", got + 1)
+            }
             IO(e) => write!(f, "{e}"),
             UnclosedQuote => write!(f, "unclosed quote"),
             InvalidByte(b) => {
